@@ -1430,6 +1430,16 @@ public final class Settings {
     public final Setting<Boolean> notificationOnMineFail = new Setting<>(true);
 
     /**
+     * Number of ticks to wait between tree farm cycles for regrowth (default: 600 = 30 seconds)
+     */
+    public final Setting<Integer> farmTreesWaitTicks = new Setting<>(600);
+
+    /**
+     * Whether to replant saplings after chopping trees in the farmtrees command
+     */
+    public final Setting<Boolean> farmTreesReplantSaplings = new Setting<>(true);
+
+    /**
      * The number of ticks of elytra movement to simulate while firework boost is not active. Higher values are
      * computationally more expensive.
      */
