@@ -1430,11 +1430,6 @@ public final class Settings {
     public final Setting<Boolean> notificationOnMineFail = new Setting<>(true);
 
     /**
-     * Number of ticks to wait between tree farm cycles for regrowth (default: 600 = 30 seconds)
-     */
-    public final Setting<Integer> farmTreesWaitTicks = new Setting<>(600);
-
-    /**
      * Whether to replant saplings after chopping trees in the farmtrees command
      */
     public final Setting<Boolean> farmTreesReplantSaplings = new Setting<>(true);

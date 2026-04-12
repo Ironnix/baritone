@@ -21,6 +21,8 @@ import baritone.api.IBaritone;
 import baritone.api.command.Command;
 import baritone.api.command.argument.IArgConsumer;
 import baritone.api.command.exception.CommandException;
+import baritone.api.command.exception.CommandInvalidStateException;
+import baritone.api.selection.ISelection;
 import net.minecraft.core.BlockPos;
 
 import java.util.Arrays;
@@ -35,16 +37,33 @@ public class FarmTreesCommand extends Command {
 
     @Override
     public void execute(String label, IArgConsumer args) throws CommandException {
-        args.requireExactly(6);
-        int x1 = args.getAs(Integer.class);
-        int y1 = args.getAs(Integer.class);
-        int z1 = args.getAs(Integer.class);
-        int x2 = args.getAs(Integer.class);
-        int y2 = args.getAs(Integer.class);
-        int z2 = args.getAs(Integer.class);
-        BlockPos corner1 = new BlockPos(x1, y1, z1);
-        BlockPos corner2 = new BlockPos(x2, y2, z2);
-        logDirect(String.format("Starting tree farm from (%d, %d, %d) to (%d, %d, %d)", x1, y1, z1, x2, y2, z2));
+        BlockPos corner1;
+        BlockPos corner2;
+
+        if (args.hasAny()) {
+            // Explicit coordinates: #farmtrees x1 y1 z1 x2 y2 z2
+            args.requireExactly(6);
+            int x1 = args.getAs(Integer.class);
+            int y1 = args.getAs(Integer.class);
+            int z1 = args.getAs(Integer.class);
+            int x2 = args.getAs(Integer.class);
+            int y2 = args.getAs(Integer.class);
+            int z2 = args.getAs(Integer.class);
+            corner1 = new BlockPos(x1, y1, z1);
+            corner2 = new BlockPos(x2, y2, z2);
+        } else {
+            // Use the current selection from #sel 1 / #sel 2
+            ISelection sel = baritone.getSelectionManager().getLastSelection();
+            if (sel == null) {
+                throw new CommandInvalidStateException("No selection set. Use #sel 1 and #sel 2 first, or provide coordinates.");
+            }
+            corner1 = sel.min();
+            corner2 = sel.max();
+        }
+
+        logDirect(String.format("Starting tree farm from (%d, %d, %d) to (%d, %d, %d)",
+                corner1.getX(), corner1.getY(), corner1.getZ(),
+                corner2.getX(), corner2.getY(), corner2.getZ()));
         baritone.getFarmTreesProcess().farmTrees(corner1, corner2);
     }
 
@@ -65,6 +84,7 @@ public class FarmTreesCommand extends Command {
                 "optionally replants saplings, then waits for tree regrowth and repeats indefinitely.",
                 "",
                 "Usage:",
+                "> farmtrees - Uses the current selection (set with #sel 1 and #sel 2).",
                 "> farmtrees <x1> <y1> <z1> <x2> <y2> <z2> - Farm trees in the specified bounding box.",
                 "",
                 "Settings:",
