@@ -40,7 +40,6 @@ import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.AirBlock;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
-import net.minecraft.world.level.block.LeavesBlock;
 import net.minecraft.world.level.block.SaplingBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.BlockHitResult;
@@ -99,48 +98,35 @@ public final class FarmTreesProcess extends BaritoneProcessHelper implements IFa
 
     private PathingCommand handleChopping(boolean calcFailed, boolean isSafeToCancel) {
         List<BlockPos> logs = scanForLogs();
-        List<BlockPos> leaves = scanForLeaves();
 
-        if (logs.isEmpty() && leaves.isEmpty()) {
+        if (logs.isEmpty()) {
             phase = Phase.CLEANUP;
-            logDirect("All logs and leaves cleared, cleaning up placed blocks...");
+            logDirect("All logs cleared, cleaning up placed blocks...");
             return handleCleanup(false, isSafeToCancel);
         }
 
-        // Combine logs and leaves, sort by Y ascending — mine bottom first
-        List<BlockPos> targets = new ArrayList<>();
-        targets.addAll(logs);
-        targets.addAll(leaves);
-        targets.sort(Comparator.comparingInt(BlockPos::getY));
-        int bottomY = targets.get(0).getY();
+        // Sort logs by Y DESCENDING — mine top first, work downward
+        logs.sort(Comparator.<BlockPos>comparingInt(BlockPos::getY).reversed());
+        int topY = logs.get(0).getY();
 
-        // Only target the current bottom layer (within 1 Y of lowest)
-        List<BlockPos> currentLayer = targets.stream()
-                .filter(pos -> pos.getY() <= bottomY + 1)
+        // Top layer for pathfinding goal (within 2 Y of highest)
+        List<BlockPos> topLayer = logs.stream()
+                .filter(pos -> pos.getY() >= topY - 2)
                 .collect(Collectors.toList());
 
-        // Try to break a block within reach at or below head level
+        // Try to break any reachable log
         baritone.getInputOverrideHandler().clearAllKeys();
         BetterBlockPos playerPos = ctx.playerFeet();
-        int playerHeadY = playerPos.getY() + 1;
         double blockReachDistance = ctx.playerController().getBlockReachDistance();
 
-        for (BlockPos pos : currentLayer) {
-            if (pos.getY() > playerHeadY) {
-                continue;
-            }
+        for (BlockPos pos : logs) {
             if (playerPos.distSqr(pos) > blockReachDistance * blockReachDistance) {
                 continue;
             }
             Optional<Rotation> rot = RotationUtils.reachable(ctx, pos);
             if (rot.isPresent() && isSafeToCancel) {
                 baritone.getLookBehavior().updateTarget(rot.get(), true);
-                BlockState targetState = ctx.world().getBlockState(pos);
-                if (targetState.getBlock() instanceof LeavesBlock) {
-                    // Break leaves with bare hand — no tool switch
-                } else {
-                    MovementHelper.switchToBestToolFor(ctx, targetState);
-                }
+                MovementHelper.switchToBestToolFor(ctx, ctx.world().getBlockState(pos));
                 if (ctx.isLookingAt(pos)) {
                     baritone.getInputOverrideHandler().setInputForceState(Input.CLICK_LEFT, true);
                 }
@@ -152,8 +138,8 @@ public final class FarmTreesProcess extends BaritoneProcessHelper implements IFa
             logDirect("FarmTrees: pathfinding failed, retrying...");
         }
 
-        // Path to the current bottom layer
-        List<Goal> goals = currentLayer.stream()
+        // Path toward the top layer of logs
+        List<Goal> goals = topLayer.stream()
                 .map(pos -> (Goal) new GoalTwoBlocks(pos.getX(), pos.getY(), pos.getZ()))
                 .collect(Collectors.toList());
 
@@ -292,29 +278,6 @@ public final class FarmTreesProcess extends BaritoneProcessHelper implements IFa
             }
         }
         return logs;
-    }
-
-    private List<BlockPos> scanForLeaves() {
-        List<BlockPos> leaves = new ArrayList<>();
-        int minX = Math.min(corner1.getX(), corner2.getX());
-        int maxX = Math.max(corner1.getX(), corner2.getX());
-        int minY = Math.min(corner1.getY(), corner2.getY());
-        int maxY = Math.max(corner1.getY(), corner2.getY());
-        int minZ = Math.min(corner1.getZ(), corner2.getZ());
-        int maxZ = Math.max(corner1.getZ(), corner2.getZ());
-
-        for (int x = minX; x <= maxX; x++) {
-            for (int y = minY; y <= maxY; y++) {
-                for (int z = minZ; z <= maxZ; z++) {
-                    BlockPos pos = new BlockPos(x, y, z);
-                    BlockState state = ctx.world().getBlockState(pos);
-                    if (state.is(BlockTags.LEAVES)) {
-                        leaves.add(pos);
-                    }
-                }
-            }
-        }
-        return leaves;
     }
 
     private List<BlockPos> scanForPlantableSpots() {
