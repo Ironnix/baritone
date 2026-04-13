@@ -56,6 +56,8 @@ public final class FarmTreesProcess extends BaritoneProcessHelper implements IFa
     private BlockPos corner2;
     private Phase phase;
     private Set<BlockPos> originalAirBlocks; // snapshot of air at start, to detect placed blocks
+    private BlockPos currentlyMining; // block we're actively mining (persist across ticks)
+    private int miningTicks; // how many ticks we've been trying to mine currentlyMining
 
     private enum Phase {
         CHOPPING,
@@ -114,9 +116,50 @@ public final class FarmTreesProcess extends BaritoneProcessHelper implements IFa
                 .filter(pos -> pos.getY() >= topY - 2)
                 .collect(Collectors.toList());
 
+        BetterBlockPos playerPos = ctx.playerFeet();
+
+        // If we're already mining a block, keep going until it breaks or we give up
+        if (currentlyMining != null) {
+            BlockState miningState = ctx.world().getBlockState(currentlyMining);
+            if (!miningState.is(BlockTags.LOGS)) {
+                // Block was broken or is no longer a log
+                currentlyMining = null;
+                miningTicks = 0;
+            } else if (miningTicks > 60) {
+                // Stuck for too long, give up and let pathfinder try something else
+                currentlyMining = null;
+                miningTicks = 0;
+            } else {
+                miningTicks++;
+                baritone.getInputOverrideHandler().clearAllKeys();
+                // Jump if the block is above feet level — maintain contact while airborne
+                if (currentlyMining.getY() >= playerPos.getY() + 2) {
+                    baritone.getInputOverrideHandler().setInputForceState(Input.JUMP, true);
+                }
+                Optional<Rotation> rot = RotationUtils.reachable(ctx, currentlyMining);
+                if (rot.isPresent()) {
+                    baritone.getLookBehavior().updateTarget(rot.get(), true);
+                    MovementHelper.switchToBestToolFor(ctx, miningState);
+                    if (ctx.isLookingAt(currentlyMining)) {
+                        baritone.getInputOverrideHandler().setInputForceState(Input.CLICK_LEFT, true);
+                    }
+                } else {
+                    // Not reachable right now — keep looking at it and jumping, we'll hit it at jump peak
+                    Rotation lookAt = RotationUtils.calcRotationFromVec3d(
+                            ctx.playerHead(),
+                            new Vec3(currentlyMining.getX() + 0.5, currentlyMining.getY() + 0.5, currentlyMining.getZ() + 0.5),
+                            ctx.playerRotations()
+                    );
+                    baritone.getLookBehavior().updateTarget(lookAt, true);
+                    MovementHelper.switchToBestToolFor(ctx, miningState);
+                    baritone.getInputOverrideHandler().setInputForceState(Input.CLICK_LEFT, true);
+                }
+                return new PathingCommand(null, PathingCommandType.REQUEST_PAUSE);
+            }
+        }
+
         // Try to break any reachable log
         baritone.getInputOverrideHandler().clearAllKeys();
-        BetterBlockPos playerPos = ctx.playerFeet();
         double blockReachDistance = ctx.playerController().getBlockReachDistance();
 
         for (BlockPos pos : logs) {
@@ -125,6 +168,8 @@ public final class FarmTreesProcess extends BaritoneProcessHelper implements IFa
             }
             Optional<Rotation> rot = RotationUtils.reachable(ctx, pos);
             if (rot.isPresent() && isSafeToCancel) {
+                currentlyMining = pos;
+                miningTicks = 0;
                 baritone.getLookBehavior().updateTarget(rot.get(), true);
                 MovementHelper.switchToBestToolFor(ctx, ctx.world().getBlockState(pos));
                 if (ctx.isLookingAt(pos)) {
@@ -356,6 +401,8 @@ public final class FarmTreesProcess extends BaritoneProcessHelper implements IFa
         corner2 = null;
         phase = null;
         originalAirBlocks = null;
+        currentlyMining = null;
+        miningTicks = 0;
     }
 
     @Override
