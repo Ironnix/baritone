@@ -36,11 +36,11 @@ import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.tags.BlockTags;
 import net.minecraft.world.item.BlockItem;
-import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.AirBlock;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.LeavesBlock;
 import net.minecraft.world.level.block.SaplingBlock;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.BlockHitResult;
@@ -56,6 +56,7 @@ public final class FarmTreesProcess extends BaritoneProcessHelper implements IFa
     private BlockPos corner1;
     private BlockPos corner2;
     private Phase phase;
+    private Set<BlockPos> originalAirBlocks; // snapshot of air at start, to detect placed blocks
 
     private enum Phase {
         CHOPPING,
@@ -78,6 +79,7 @@ public final class FarmTreesProcess extends BaritoneProcessHelper implements IFa
         this.corner2 = corner2;
         this.active = true;
         this.phase = Phase.CHOPPING;
+        this.originalAirBlocks = snapshotAirBlocks();
     }
 
     @Override
@@ -97,27 +99,101 @@ public final class FarmTreesProcess extends BaritoneProcessHelper implements IFa
 
     private PathingCommand handleChopping(boolean calcFailed, boolean isSafeToCancel) {
         List<BlockPos> logs = scanForLogs();
+        List<BlockPos> leaves = scanForLeaves();
 
-        if (logs.isEmpty()) {
-            // No more logs — move to cleanup phase to collect placed blocks
+        if (logs.isEmpty() && leaves.isEmpty()) {
             phase = Phase.CLEANUP;
-            logDirect("All logs chopped, cleaning up placed blocks...");
+            logDirect("All logs and leaves cleared, cleaning up placed blocks...");
             return handleCleanup(false, isSafeToCancel);
         }
 
-        // Sort by Y descending (mine from top to bottom to avoid floating logs)
-        logs.sort(Comparator.<BlockPos>comparingInt(BlockPos::getY).reversed());
+        // Combine logs and leaves, sort by Y ascending — mine bottom first
+        List<BlockPos> targets = new ArrayList<>();
+        targets.addAll(logs);
+        targets.addAll(leaves);
+        targets.sort(Comparator.comparingInt(BlockPos::getY));
+        int bottomY = targets.get(0).getY();
 
-        // Try to break a log within reach, but ONLY if the log is at or below
-        // the player's head level. If a log is above us, let the pathfinder
-        // handle getting there (pillaring/scaffolding) without interruption.
+        // Only target the current bottom layer (within 1 Y of lowest)
+        List<BlockPos> currentLayer = targets.stream()
+                .filter(pos -> pos.getY() <= bottomY + 1)
+                .collect(Collectors.toList());
+
+        // Try to break a block within reach at or below head level
         baritone.getInputOverrideHandler().clearAllKeys();
         BetterBlockPos playerPos = ctx.playerFeet();
         int playerHeadY = playerPos.getY() + 1;
         double blockReachDistance = ctx.playerController().getBlockReachDistance();
 
-        for (BlockPos pos : logs) {
-            // Skip logs above head — don't interrupt the pathfinder's pillar movement
+        for (BlockPos pos : currentLayer) {
+            if (pos.getY() > playerHeadY) {
+                continue;
+            }
+            if (playerPos.distSqr(pos) > blockReachDistance * blockReachDistance) {
+                continue;
+            }
+            Optional<Rotation> rot = RotationUtils.reachable(ctx, pos);
+            if (rot.isPresent() && isSafeToCancel) {
+                baritone.getLookBehavior().updateTarget(rot.get(), true);
+                BlockState targetState = ctx.world().getBlockState(pos);
+                if (targetState.getBlock() instanceof LeavesBlock) {
+                    // Break leaves with bare hand — no tool switch
+                } else {
+                    MovementHelper.switchToBestToolFor(ctx, targetState);
+                }
+                if (ctx.isLookingAt(pos)) {
+                    baritone.getInputOverrideHandler().setInputForceState(Input.CLICK_LEFT, true);
+                }
+                return new PathingCommand(null, PathingCommandType.REQUEST_PAUSE);
+            }
+        }
+
+        if (calcFailed) {
+            logDirect("FarmTrees: pathfinding failed, retrying...");
+        }
+
+        // Path to the current bottom layer
+        List<Goal> goals = currentLayer.stream()
+                .map(pos -> (Goal) new GoalTwoBlocks(pos.getX(), pos.getY(), pos.getZ()))
+                .collect(Collectors.toList());
+
+        return new PathingCommand(
+                new GoalComposite(goals.toArray(new Goal[0])),
+                PathingCommandType.REVALIDATE_GOAL_AND_PATH
+        );
+    }
+
+    private PathingCommand handleCleanup(boolean calcFailed, boolean isSafeToCancel) {
+        // Find blocks that were originally air but are now solid (placed by the bot as scaffolding)
+        List<BlockPos> placedBlocks = new ArrayList<>();
+        for (BlockPos pos : originalAirBlocks) {
+            BlockState state = ctx.world().getBlockState(pos);
+            if (!state.isAir() && !state.is(BlockTags.LOGS) && !state.is(BlockTags.LEAVES) && !state.is(BlockTags.SAPLINGS)) {
+                placedBlocks.add(pos);
+            }
+        }
+
+        if (placedBlocks.isEmpty()) {
+            if (Baritone.settings().farmTreesReplantSaplings.value) {
+                phase = Phase.REPLANTING;
+                logDirect("Cleanup done, replanting saplings...");
+                return handleReplanting(false, isSafeToCancel);
+            }
+            logDirect("FarmTrees done.");
+            onLostControl();
+            return new PathingCommand(null, PathingCommandType.REQUEST_PAUSE);
+        }
+
+        // Sort by Y descending — remove top blocks first to avoid stranding
+        placedBlocks.sort(Comparator.<BlockPos>comparingInt(BlockPos::getY).reversed());
+
+        // Try to break a placed block within reach
+        baritone.getInputOverrideHandler().clearAllKeys();
+        BetterBlockPos playerPos = ctx.playerFeet();
+        int playerHeadY = playerPos.getY() + 1;
+        double blockReachDistance = ctx.playerController().getBlockReachDistance();
+
+        for (BlockPos pos : placedBlocks) {
             if (pos.getY() > playerHeadY) {
                 continue;
             }
@@ -136,70 +212,10 @@ public final class FarmTreesProcess extends BaritoneProcessHelper implements IFa
         }
 
         if (calcFailed) {
-            logDirect("FarmTrees: pathfinding failed, retrying...");
-        }
-
-        // Target ALL log positions as goals. The pathfinder will find the
-        // cheapest path to any of them. For 2x2 trees this means it will
-        // enter the trunk through already-broken spaces and ascend by
-        // breaking logs as stairs — much cheaper than pillaring from outside.
-        // Use REVALIDATE_GOAL_AND_PATH so the path updates each tick as
-        // logs are broken and new spaces open up.
-        List<Goal> goals = logs.stream()
-                .map(pos -> (Goal) new GoalTwoBlocks(pos.getX(), pos.getY(), pos.getZ()))
-                .collect(Collectors.toList());
-
-        return new PathingCommand(
-                new GoalComposite(goals.toArray(new Goal[0])),
-                PathingCommandType.REVALIDATE_GOAL_AND_PATH
-        );
-    }
-
-    private PathingCommand handleCleanup(boolean calcFailed, boolean isSafeToCancel) {
-        // Scan for throwaway blocks inside the bounding box that the bot placed
-        // while scaffolding up. Break them so they drop as items.
-        List<BlockPos> throwawayBlocks = scanForThrowawayBlocks();
-
-        if (throwawayBlocks.isEmpty()) {
-            // Cleanup done — move to replanting or finish
-            if (Baritone.settings().farmTreesReplantSaplings.value) {
-                phase = Phase.REPLANTING;
-                logDirect("Cleanup done, replanting saplings...");
-                return handleReplanting(false, isSafeToCancel);
-            } else {
-                logDirect("FarmTrees done.");
-                onLostControl();
-                return new PathingCommand(null, PathingCommandType.REQUEST_PAUSE);
-            }
-        }
-
-        // Break from top to bottom so we don't strand ourselves
-        throwawayBlocks.sort(Comparator.<BlockPos>comparingInt(BlockPos::getY).reversed());
-
-        baritone.getInputOverrideHandler().clearAllKeys();
-        BetterBlockPos playerPos = ctx.playerFeet();
-        double blockReachDistance = ctx.playerController().getBlockReachDistance();
-
-        for (BlockPos pos : throwawayBlocks) {
-            if (playerPos.distSqr(pos) > blockReachDistance * blockReachDistance) {
-                continue;
-            }
-            Optional<Rotation> rot = RotationUtils.reachable(ctx, pos);
-            if (rot.isPresent() && isSafeToCancel) {
-                baritone.getLookBehavior().updateTarget(rot.get(), true);
-                MovementHelper.switchToBestToolFor(ctx, ctx.world().getBlockState(pos));
-                if (ctx.isLookingAt(pos)) {
-                    baritone.getInputOverrideHandler().setInputForceState(Input.CLICK_LEFT, true);
-                }
-                return new PathingCommand(null, PathingCommandType.REQUEST_PAUSE);
-            }
-        }
-
-        if (calcFailed) {
             logDirect("FarmTrees: cleanup pathfinding failed, retrying...");
         }
 
-        List<Goal> goals = throwawayBlocks.stream()
+        List<Goal> goals = placedBlocks.stream()
                 .map(pos -> (Goal) new GoalTwoBlocks(pos.getX(), pos.getY(), pos.getZ()))
                 .collect(Collectors.toList());
 
@@ -210,8 +226,6 @@ public final class FarmTreesProcess extends BaritoneProcessHelper implements IFa
     }
 
     private PathingCommand handleReplanting(boolean calcFailed, boolean isSafeToCancel) {
-        // Find dirt/grass blocks within the bounding box that have air above them
-        // and could have a sapling placed on them
         List<BlockPos> plantable = scanForPlantableSpots();
 
         if (plantable.isEmpty() || !hasSaplingInInventory()) {
@@ -224,12 +238,10 @@ public final class FarmTreesProcess extends BaritoneProcessHelper implements IFa
         BetterBlockPos playerPos = ctx.playerFeet();
         double blockReachDistance = ctx.playerController().getBlockReachDistance();
 
-        // Try to place saplings within reach
         for (BlockPos pos : plantable) {
             if (playerPos.distSqr(pos) > blockReachDistance * blockReachDistance) {
                 continue;
             }
-            // We target the top face of the ground block (pos is the ground block)
             Optional<Rotation> rot = RotationUtils.reachableOffset(ctx, pos, new Vec3(pos.getX() + 0.5, pos.getY() + 1, pos.getZ() + 0.5), blockReachDistance, false);
             if (rot.isPresent() && isSafeToCancel && baritone.getInventoryBehavior().throwaway(true, this::isSapling)) {
                 HitResult result = RayTraceUtils.rayTraceTowards(ctx.player(), rot.get(), blockReachDistance);
@@ -244,15 +256,13 @@ public final class FarmTreesProcess extends BaritoneProcessHelper implements IFa
         }
 
         if (calcFailed) {
-            // Can't reach plantable spots, finish up
-            logDirect("FarmTrees done (couldn't reach all planting spots).");
+            logDirect("FarmTrees done.");
             onLostControl();
             return new PathingCommand(null, PathingCommandType.REQUEST_PAUSE);
         }
 
-        // Path to plantable spots
         List<Goal> goals = plantable.stream()
-                .map(pos -> new GoalBlock(pos.above()))
+                .map(pos -> (Goal) new GoalBlock(pos.above()))
                 .collect(Collectors.toList());
 
         return new PathingCommand(
@@ -284,6 +294,29 @@ public final class FarmTreesProcess extends BaritoneProcessHelper implements IFa
         return logs;
     }
 
+    private List<BlockPos> scanForLeaves() {
+        List<BlockPos> leaves = new ArrayList<>();
+        int minX = Math.min(corner1.getX(), corner2.getX());
+        int maxX = Math.max(corner1.getX(), corner2.getX());
+        int minY = Math.min(corner1.getY(), corner2.getY());
+        int maxY = Math.max(corner1.getY(), corner2.getY());
+        int minZ = Math.min(corner1.getZ(), corner2.getZ());
+        int maxZ = Math.max(corner1.getZ(), corner2.getZ());
+
+        for (int x = minX; x <= maxX; x++) {
+            for (int y = minY; y <= maxY; y++) {
+                for (int z = minZ; z <= maxZ; z++) {
+                    BlockPos pos = new BlockPos(x, y, z);
+                    BlockState state = ctx.world().getBlockState(pos);
+                    if (state.is(BlockTags.LEAVES)) {
+                        leaves.add(pos);
+                    }
+                }
+            }
+        }
+        return leaves;
+    }
+
     private List<BlockPos> scanForPlantableSpots() {
         List<BlockPos> spots = new ArrayList<>();
         int minX = Math.min(corner1.getX(), corner2.getX());
@@ -299,7 +332,6 @@ public final class FarmTreesProcess extends BaritoneProcessHelper implements IFa
                     BlockPos pos = new BlockPos(x, y, z);
                     BlockState state = ctx.world().getBlockState(pos);
                     Block block = state.getBlock();
-                    // Check if this is a dirt-like block that saplings can be planted on
                     if (block == Blocks.DIRT || block == Blocks.GRASS_BLOCK || block == Blocks.PODZOL
                             || block == Blocks.COARSE_DIRT || block == Blocks.ROOTED_DIRT || block == Blocks.MUD
                             || block == Blocks.MUDDY_MANGROVE_ROOTS) {
@@ -332,20 +364,8 @@ public final class FarmTreesProcess extends BaritoneProcessHelper implements IFa
         return ctx.player().getInventory().getNonEquipmentItems().stream().anyMatch(this::isSapling);
     }
 
-    private List<BlockPos> scanForThrowawayBlocks() {
-        // Find blocks inside the bounding box that match the acceptableThrowawayItems
-        // setting — these are blocks the bot placed as scaffolding
-        Set<Block> throwawayBlocks = new HashSet<>();
-        for (Item item : Baritone.settings().acceptableThrowawayItems.value) {
-            if (item instanceof BlockItem) {
-                throwawayBlocks.add(((BlockItem) item).getBlock());
-            }
-        }
-        if (throwawayBlocks.isEmpty()) {
-            return Collections.emptyList();
-        }
-
-        List<BlockPos> found = new ArrayList<>();
+    private Set<BlockPos> snapshotAirBlocks() {
+        Set<BlockPos> airBlocks = new HashSet<>();
         int minX = Math.min(corner1.getX(), corner2.getX());
         int maxX = Math.max(corner1.getX(), corner2.getX());
         int minY = Math.min(corner1.getY(), corner2.getY());
@@ -357,14 +377,13 @@ public final class FarmTreesProcess extends BaritoneProcessHelper implements IFa
             for (int y = minY; y <= maxY; y++) {
                 for (int z = minZ; z <= maxZ; z++) {
                     BlockPos pos = new BlockPos(x, y, z);
-                    Block block = ctx.world().getBlockState(pos).getBlock();
-                    if (throwawayBlocks.contains(block)) {
-                        found.add(pos);
+                    if (ctx.world().getBlockState(pos).isAir()) {
+                        airBlocks.add(pos);
                     }
                 }
             }
         }
-        return found;
+        return airBlocks;
     }
 
     @Override
@@ -373,6 +392,7 @@ public final class FarmTreesProcess extends BaritoneProcessHelper implements IFa
         corner1 = null;
         corner2 = null;
         phase = null;
+        originalAirBlocks = null;
     }
 
     @Override
