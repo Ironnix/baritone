@@ -59,7 +59,6 @@ public final class FarmTreesProcess extends BaritoneProcessHelper implements IFa
     private BlockPos corner2;
     private Phase phase;
     private Set<BlockPos> originalAirBlocks; // snapshot of air at start, to detect placed blocks
-    private Set<BlockPos> cleanupTargets; // snapshot of placed blocks when cleanup starts
     private BlockPos focusedLog; // anchor used to keep working on one tree at a time
     private BlockPos currentlyMining; // block we're actively mining (persist across ticks)
     private int miningTicks; // how many ticks we've been trying to mine currentlyMining
@@ -111,7 +110,6 @@ public final class FarmTreesProcess extends BaritoneProcessHelper implements IFa
 
         if (logs.isEmpty()) {
             phase = Phase.CLEANUP;
-            cleanupTargets = snapshotCleanupTargets();
             logDirect("All logs cleared, cleaning up placed blocks...");
             return handleCleanup(false, isSafeToCancel);
         }
@@ -253,13 +251,9 @@ public final class FarmTreesProcess extends BaritoneProcessHelper implements IFa
     }
 
     private PathingCommand handleCleanup(boolean calcFailed, boolean isSafeToCancel) {
-        if (cleanupTargets == null) {
-            cleanupTargets = snapshotCleanupTargets();
-        }
-
-        // Only remove the scaffold snapshot captured when cleanup started.
+        // Re-scan cleanup candidates every tick so newly placed scaffold can be cleaned later.
         List<BlockPos> placedBlocks = new ArrayList<>();
-        for (BlockPos pos : cleanupTargets) {
+        for (BlockPos pos : originalAirBlocks) {
             BlockState state = ctx.world().getBlockState(pos);
             if (!state.isAir() && !state.is(BlockTags.LOGS) && !state.is(BlockTags.LEAVES) && !state.is(BlockTags.SAPLINGS)) {
                 placedBlocks.add(pos);
@@ -272,8 +266,12 @@ public final class FarmTreesProcess extends BaritoneProcessHelper implements IFa
             return handleCollecting(false, isSafeToCancel);
         }
 
-        // Sort by Y descending — remove top blocks first to avoid stranding
-        placedBlocks.sort(Comparator.<BlockPos>comparingInt(BlockPos::getY).reversed());
+        // Only work on the current highest cleanup layer so lower newly placed scaffold is deferred.
+        int topY = placedBlocks.stream().mapToInt(BlockPos::getY).max().orElse(Integer.MIN_VALUE);
+        List<BlockPos> topLayer = placedBlocks.stream()
+                .filter(pos -> pos.getY() == topY)
+                .sorted(Comparator.comparingDouble(ctx.playerFeet()::distSqr))
+                .collect(Collectors.toList());
 
         // Try to break a placed block within reach
         baritone.getInputOverrideHandler().clearAllKeys();
@@ -281,7 +279,7 @@ public final class FarmTreesProcess extends BaritoneProcessHelper implements IFa
         int playerHeadY = playerPos.getY() + 1;
         double blockReachDistance = ctx.playerController().getBlockReachDistance();
 
-        for (BlockPos pos : placedBlocks) {
+        for (BlockPos pos : topLayer) {
             if (pos.getY() > playerHeadY) {
                 continue;
             }
@@ -303,7 +301,7 @@ public final class FarmTreesProcess extends BaritoneProcessHelper implements IFa
             logDirect("FarmTrees: cleanup pathfinding failed, retrying...");
         }
 
-        List<Goal> goals = placedBlocks.stream()
+        List<Goal> goals = topLayer.stream()
                 .map(pos -> (Goal) new GoalTwoBlocks(pos.getX(), pos.getY(), pos.getZ()))
                 .collect(Collectors.toList());
 
@@ -325,6 +323,9 @@ public final class FarmTreesProcess extends BaritoneProcessHelper implements IFa
                 continue;
             }
             if (!isInsideFarm(itemEntity.blockPosition())) {
+                continue;
+            }
+            if (isDropOnLeaves(itemEntity)) {
                 continue;
             }
             goals.add(new GoalBlock(new BetterBlockPos(entity.position().x, entity.position().y + 0.1, entity.position().z)));
@@ -504,20 +505,6 @@ public final class FarmTreesProcess extends BaritoneProcessHelper implements IFa
         return logs;
     }
 
-    private Set<BlockPos> snapshotCleanupTargets() {
-        Set<BlockPos> targets = new HashSet<>();
-        if (originalAirBlocks == null) {
-            return targets;
-        }
-        for (BlockPos pos : originalAirBlocks) {
-            BlockState state = ctx.world().getBlockState(pos);
-            if (!state.isAir() && !state.is(BlockTags.LOGS) && !state.is(BlockTags.LEAVES) && !state.is(BlockTags.SAPLINGS)) {
-                targets.add(pos);
-            }
-        }
-        return targets;
-    }
-
     private List<BlockPos> scanForPlantableSpots() {
         List<BlockPos> spots = new ArrayList<>();
         int minX = Math.min(corner1.getX(), corner2.getX());
@@ -585,6 +572,12 @@ public final class FarmTreesProcess extends BaritoneProcessHelper implements IFa
                 && pos.getZ() >= minZ && pos.getZ() <= maxZ;
     }
 
+    private boolean isDropOnLeaves(ItemEntity itemEntity) {
+        BlockPos itemPos = itemEntity.blockPosition();
+        return ctx.world().getBlockState(itemPos).is(BlockTags.LEAVES)
+                || ctx.world().getBlockState(itemPos.below()).is(BlockTags.LEAVES);
+    }
+
     private boolean hasSaplingInInventory() {
         return ctx.player().getInventory().getNonEquipmentItems().stream().anyMatch(this::isSapling);
     }
@@ -618,7 +611,6 @@ public final class FarmTreesProcess extends BaritoneProcessHelper implements IFa
         corner2 = null;
         phase = null;
         originalAirBlocks = null;
-        cleanupTargets = null;
         focusedLog = null;
         currentlyMining = null;
         miningTicks = 0;
