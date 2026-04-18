@@ -24,17 +24,17 @@ import baritone.api.command.exception.CommandException;
 import baritone.api.command.exception.CommandInvalidStateException;
 import baritone.api.selection.ISelection;
 import net.minecraft.core.BlockPos;
-import net.minecraft.tags.BlockTags;
+import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 
 import java.util.Arrays;
 import java.util.List;
 import java.util.stream.Stream;
 
-public class FarmTreesCommand extends Command {
+public class MineObsidianCommand extends Command {
 
-    public FarmTreesCommand(IBaritone baritone) {
-        super(baritone, "farmtrees");
+    public MineObsidianCommand(IBaritone baritone) {
+        super(baritone, "mineobsidian");
     }
 
     @Override
@@ -43,7 +43,6 @@ public class FarmTreesCommand extends Command {
         BlockPos corner2;
 
         if (args.hasAny()) {
-            // Explicit coordinates: #farmtrees x1 y1 z1 x2 y2 z2
             args.requireExactly(6);
             int x1 = args.getAs(Integer.class);
             int y1 = args.getAs(Integer.class);
@@ -54,7 +53,6 @@ public class FarmTreesCommand extends Command {
             corner1 = new BlockPos(x1, y1, z1);
             corner2 = new BlockPos(x2, y2, z2);
         } else {
-            // Use the current selection from #sel 1 / #sel 2
             ISelection sel = baritone.getSelectionManager().getLastSelection();
             if (sel == null) {
                 throw new CommandInvalidStateException("No selection set. Use #sel 1 and #sel 2 first, or provide coordinates.");
@@ -63,14 +61,15 @@ public class FarmTreesCommand extends Command {
             corner2 = sel.max();
         }
 
-        logDirect(String.format("Found %d log blocks to mine in area (%d, %d, %d) to (%d, %d, %d)",
-                countLogs(corner1, corner2),
+        int count = countObsidian(corner1, corner2);
+        logDirect(String.format("Found %d obsidian blocks to mine in area (%d, %d, %d) to (%d, %d, %d)",
+                count,
                 corner1.getX(), corner1.getY(), corner1.getZ(),
                 corner2.getX(), corner2.getY(), corner2.getZ()));
-        baritone.getFarmTreesProcess().farmTrees(corner1, corner2);
+        baritone.getMineObsidianProcess().mineObsidian(corner1, corner2);
     }
 
-    private int countLogs(BlockPos corner1, BlockPos corner2) {
+    private int countObsidian(BlockPos corner1, BlockPos corner2) {
         int count = 0;
         int minX = Math.min(corner1.getX(), corner2.getX());
         int maxX = Math.max(corner1.getX(), corner2.getX());
@@ -83,7 +82,7 @@ public class FarmTreesCommand extends Command {
             for (int y = minY; y <= maxY; y++) {
                 for (int z = minZ; z <= maxZ; z++) {
                     BlockState state = ctx.world().getBlockState(new BlockPos(x, y, z));
-                    if (state.is(BlockTags.LOGS)) {
+                    if (state.getBlock() == Blocks.OBSIDIAN) {
                         count++;
                     }
                 }
@@ -99,22 +98,18 @@ public class FarmTreesCommand extends Command {
 
     @Override
     public String getShortDesc() {
-        return "Farm trees in a bounding box";
+        return "Mine obsidian in a bounding box";
     }
 
     @Override
     public List<String> getLongDesc() {
         return Arrays.asList(
-                "The farmtrees command mines all log blocks within a bounding box from top to bottom,",
-                "optionally replants saplings, then waits for tree regrowth and repeats indefinitely.",
+                "The mineobsidian command mines all obsidian blocks within a bounding box from top to bottom,",
+                "cleans up any scaffold blocks placed during pathfinding, then collects drops.",
                 "",
                 "Usage:",
-                "> farmtrees - Uses the current selection (set with #sel 1 and #sel 2).",
-                "> farmtrees <x1> <y1> <z1> <x2> <y2> <z2> - Farm trees in the specified bounding box.",
-                "",
-                "Settings:",
-                "> set farmTreesWaitTicks <ticks> - Ticks to wait between cycles (default: 600 = 30s).",
-                "> set farmTreesReplantSaplings <true/false> - Whether to replant saplings (default: true)."
+                "> mineobsidian - Uses the current selection (set with #sel 1 and #sel 2).",
+                "> mineobsidian <x1> <y1> <z1> <x2> <y2> <z2> - Mine obsidian in the specified bounding box."
         );
     }
 }

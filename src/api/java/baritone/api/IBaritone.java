@@ -83,6 +83,12 @@ public interface IBaritone {
     IFarmTreesProcess getFarmTreesProcess();
 
     /**
+     * @return The {@link IMineObsidianProcess} instance
+     * @see IMineObsidianProcess
+     */
+    IMineObsidianProcess getMineObsidianProcess();
+
+    /**
      * @return The {@link ICustomGoalProcess} instance
      * @see ICustomGoalProcess
      */

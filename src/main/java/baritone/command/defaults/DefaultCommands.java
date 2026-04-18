@@ -53,6 +53,7 @@ public final class DefaultCommands {
                 new RenderCommand(baritone),
                 new FarmCommand(baritone),
                 new FarmTreesCommand(baritone),
+                new MineObsidianCommand(baritone),
                 new FollowCommand(baritone),
                 new PickupCommand(baritone),
                 new ExploreFilterCommand(baritone),
